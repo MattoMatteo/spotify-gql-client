@@ -120,7 +120,8 @@ class SpotifyPlaylistEndpoint {
             artists: [trackArtists[0]]
           },
           artists: trackArtists,
-          duration_ms: item["duration"]?["totalMilliseconds"],
+          // fetchPlaylist returns the length as trackDuration, other queries as duration
+          duration_ms: item["trackDuration"]?["totalMilliseconds"] ?? item["duration"]?["totalMilliseconds"],
           external_urls: {
             spotify: "https://open.spotify.com/track/${item["uri"].split(":").last}",
           },
