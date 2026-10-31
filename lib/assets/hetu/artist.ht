@@ -3,6 +3,7 @@ import { SpotifyError } from "error.ht"
 
 var HttpClient = std.HttpClient
 var HttpResponse = std.HttpResponse
+var RequestOptions = std.RequestOptions
 
 class SpotifyArtistEndpoint {
   var apiClient: HttpClient
@@ -75,46 +76,94 @@ class SpotifyArtistEndpoint {
         }
 
         var artist = data["data"]["artistUnion"]
-        var topTracks = artist["discography"]["topTracks"]["items"].map((track){
-          var item = track["track"]
-          var trackArtists = item["artists"]?["items"]?.map((artist){
-            var id = artist["uri"].split(":").last
+        var items = artist["discography"]["topTracks"]["items"]
+
+        // The overview gives the album of each top track without its name:
+        // fetch the missing ones
+        var missingAlbumIds = []
+        for (var track in items) {
+          var albumId = track["track"]["albumOfTrack"]["uri"].split(":").last
+          if (track["track"]["albumOfTrack"]["name"] == null && !missingAlbumIds.contains(albumId)) {
+            missingAlbumIds.add(albumId)
+          }
+        }
+
+        return albumNames(missingAlbumIds).then((names) {
+          var topTracks = items.map((track){
+            var item = track["track"]
+            var trackArtists = item["artists"]?["items"]?.map((artist){
+              var id = artist["uri"].split(":").last
+              return {
+                id: id,
+                uri: artist["uri"],
+                name: artist["profile"]["name"],
+                external_urls: {
+                  spotify: "https://open.spotify.com/artist/${id}",
+                },
+              }.toJson()
+            }).toList() ?? []
+            var albumId = item["albumOfTrack"]["uri"].split(":").last
+            var albumIndex = missingAlbumIds.indexOf(albumId)
+
             return {
-              id: id,
-              uri: artist["uri"],
-              name: artist["profile"]["name"],
+              id: item["uri"].split(":").last,
+              uri: item["uri"],
+              name: item["name"],
+              album: {
+                album_type: "album",
+                id: albumId,
+                name: item["albumOfTrack"]["name"] ?? (albumIndex >= 0 ? names[albumIndex] : null) ?? "",
+                images: item["albumOfTrack"]["coverArt"]?["sources"] ?? [],
+                external_urls: {
+                  spotify: "https://open.spotify.com/album/${albumId}",
+                },
+                href: "https://api.spotify.com/v1/albums/${albumId}",
+                artists: [trackArtists[0]]
+              },
+              artists: trackArtists,
+              duration_ms: item["duration"]?["totalMilliseconds"],
               external_urls: {
-                spotify: "https://open.spotify.com/artist/${id}",
+                spotify: "https://open.spotify.com/track/${item["uri"].split(":").last}",
               },
             }.toJson()
-          }).toList() ?? []
-          var albumId = item["albumOfTrack"]["uri"].split(":").last
+          })
 
-          return {
-            id: item["uri"].split(":").last,
-            uri: item["uri"],
-            name: item["name"],
-            album: {
-              album_type: "album",
-              id: albumId,
-              name: item["albumOfTrack"]?["name"] ?? "unknown",
-              images: item["albumOfTrack"]["coverArt"]?["sources"] ?? [],
-              external_urls: {
-                spotify: "https://open.spotify.com/album/${albumId}",
-              },
-              href: "https://api.spotify.com/v1/albums/${albumId}",
-              artists: [trackArtists[0]]
-            },
-            artists: trackArtists,
-            duration_ms: item["duration"]?["totalMilliseconds"],
-            external_urls: {
-              spotify: "https://open.spotify.com/track/${item["uri"].split(":").last}",
-            },
-          }.toJson()
+          return { tracks: topTracks }.toJson()
         })
-
-        return { tracks: topTracks }.toJson()
       })
+  }
+
+  // Names of the albums [albumIds], in the same order; null for an album
+  // that couldn't be fetched
+  fun albumNames(albumIds: List) {
+    var client = this.gqlClient
+    return Future.wait(albumIds.map((albumId) {
+      return client.post(
+        "",
+        data: {
+          "variables": {
+            "uri": "spotify:album:${albumId}",
+            "locale": "",
+            "offset": 0,
+            "limit": 1
+          },
+          "operationName": "getAlbum",
+          "extensions": {
+            "persistedQuery": {
+              "version": 1,
+              "sha256Hash": "b9bfabef66ed756e5e13f68a942deb60bd4125ec1f1be8cc42769dc0259b4b10"
+            }
+          }
+        }.toJson(),
+        // A failed album only loses its name, not the whole list
+        options: RequestOptions(validateStatus: (status) => true),
+      ).then((res: HttpResponse) {
+        if (res.statusCode != 200 || res.data is str) {
+          return null
+        }
+        return res.data?["data"]?["albumUnion"]?["name"]
+      })
+    }).toList())
   }
 
   fun albums(artistId: string, {limit: int, offset: int}) {
@@ -143,6 +192,16 @@ class SpotifyArtistEndpoint {
           (artist["discography"]?["singles"]["totalCount"] ?? 0) +
           (artist["discography"]?["compilations"]["totalCount"] ?? 0)
 
+        // Discography releases come without artists: the artist is the owner
+        var albumArtist = {
+          id: artistId,
+          uri: "spotify:artist:${artistId}",
+          name: artist["profile"]?["name"] ?? "",
+          external_urls: {
+            spotify: "https://open.spotify.com/artist/${artistId}",
+          },
+        }.toJson()
+
         var albums = [
           ...(artist["discography"]?["albums"]?["items"] ?? []),
           ...(artist["discography"]?["singles"]?["items"] ?? []),
@@ -166,6 +225,7 @@ class SpotifyArtistEndpoint {
             release_date_precision:date["precision"].toLowerCase() ?? "day",
             total_tracks: album["tracks"]["totalCount"] ?? 0,
             copyrights: album["copyright"]?["items"],
+            artists: [albumArtist],
           }.toJson()
         })
 
